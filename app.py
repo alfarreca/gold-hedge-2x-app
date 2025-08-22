@@ -1,13 +1,12 @@
-# Re-create the files to ensure fresh download links for the user.
-app_code = r'''
-import math
-from dataclasses import dataclass
-from typing import Tuple
+# Create corrected Streamlit files WITHOUT any writes to /mnt/data at runtime.
+import os, textwrap, json, pathlib
 
+app_py = r'''
 import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.express as px
+from typing import Tuple
 
 st.set_page_config(page_title="Gold Hedging & 2× Leverage Planner", layout="wide")
 
@@ -17,21 +16,19 @@ def pct(x: float) -> str:
     return f"{x*100:.2f}%"
 
 def periodize(annual_rate: float, months: float) -> float:
-    """Convert annual rate (e.g., 0.25% -> 0.0025) to simple pro-rata over months."""
+    """Convert annual rate to simple pro-rata over months (e.g., 0.25% -> 0.0025/yr)."""
     return annual_rate * (months / 12.0)
 
 def eur_return_unhedged(gold_usd_change: float, eurusd_change: float, fee_period: float) -> float:
     """
-    Exact EUR return for unhedged USD asset:
+    Exact EUR return for an unhedged USD asset:
     Return_EUR = (1 + g_USD) / (1 + ΔEURUSD) - 1 - fees
     where EURUSD is USD per EUR (up = EUR strengthens).
     """
     return (1.0 + gold_usd_change) / (1.0 + eurusd_change) - 1.0 - fee_period
 
 def eur_return_hedged(gold_usd_change: float, fee_period: float, carry_period: float) -> float:
-    """
-    Hedged EUR return ~ USD gold move minus TER and hedge carry for the period.
-    """
+    """Hedged EUR return ~ USD gold move minus TER and hedge carry for the period."""
     return gold_usd_change - fee_period - carry_period
 
 def blended_return(hedged_w: float, hedged_r: float, unhedged_r: float) -> float:
@@ -80,7 +77,7 @@ def leveraged_etp_path_pnl(initial_eur: float,
                            daily_vol: float,
                            leverage: float = 2.0,
                            seed: int = 42,
-                           alt_zigzag: bool = False) -> Tuple[pd.DataFrame, float, float]:
+                           alt_zigzag: bool = False):
     """
     Simulate path dependency for a leveraged ETP.
     - If alt_zigzag: deterministic alternating +vol/-vol path around drift.
@@ -90,7 +87,6 @@ def leveraged_etp_path_pnl(initial_eur: float,
 
     # Build daily returns in USD gold terms
     if alt_zigzag:
-        # alternate +/- daily_vol around drift
         signs = np.array([1 if i % 2 == 0 else -1 for i in range(days)])
         r = daily_drift + signs * daily_vol
     else:
@@ -106,12 +102,10 @@ def leveraged_etp_path_pnl(initial_eur: float,
         "Gold_Spot_Index": spot,
         "Leveraged_ETP_Index": etp
     })
-    # Terminal comparisons
     total_gold = spot[-1] - 1.0
     naive_2x = leverage * total_gold
     etp_total = etp[-1] - 1.0
 
-    # Scale to initial EUR for illustration
     terminal_simple_2x_value = initial_eur * (1 + naive_2x)
     terminal_etp_value = initial_eur * (1 + etp_total)
 
@@ -120,13 +114,13 @@ def leveraged_etp_path_pnl(initial_eur: float,
 # ---------- UI ----------
 
 st.title("🪙 Gold Hedging & 2× Leverage Planner")
-st.caption("Built for EU/Portugal retail investors to explore EUR-hedged sleeves, FX overlays, and 2× exposure. "
+st.caption("Explore EUR-hedged sleeves, FX overlays, and 2× exposure paths. "
            "No brokerage connection; this is a planning/calculator tool.")
 
 tab1, tab2, tab3 = st.tabs([
     "EUR-Hedged Sleeve vs Unhedged",
     "GLD/SGLN + EUR/USD FX Overlay",
-    "2× Leverage Explorer (ETP vs CFD vs Futures)"
+    "2× Leverage Explorer"
 ])
 
 # --- Tab 1: Hedged sleeve ---
@@ -144,7 +138,6 @@ with tab1:
                                     min_value=-30, max_value=30, value=10, step=1) / 100.0
         eurusd_change = st.slider("Assumed EURUSD move (total % over period)",
                                   min_value=-15, max_value=15, value=6, step=1) / 100.0
-
         st.caption("Note: EURUSD % is change in USD per EUR. Positive = EUR strengthens.")
 
     with colC:
@@ -155,7 +148,6 @@ with tab1:
         carry_ann = st.number_input("FX hedge carry (annual, %, cost if USD>EUR)",
                                     min_value=-5.00, max_value=5.00, value=1.50, step=0.10) / 100.0
 
-    # Compute
     hedged_w = hedged_pct / 100.0
     fee_unh = periodize(fee_unhedged_ann, months)
     fee_hed = periodize(fee_hedged_ann, months)
@@ -256,32 +248,10 @@ with tab3:
                        title="Path dependency: Spot vs Daily-reset 2× ETP")
         fig2.update_layout(height=420, legend_title_text="Series")
         st.plotly_chart(fig2, use_container_width=True)
-        st.metric("Terminal € (naive 2× of total move)", f"{terminal_simple_2x_value:,.2f}")
-        st.metric("Terminal € (daily-reset 2× ETP)", f"{terminal_etp_value:,.2f}")
+        colx, coly = st.columns(2)
+        colx.metric("Terminal € (naive 2× of total move)", f"{terminal_simple_2x_value:,.2f}")
+        coly.metric("Terminal € (daily-reset 2× ETP)", f"{terminal_etp_value:,.2f}")
         st.caption("Difference reflects compounding effects of daily leverage under the chosen path.")
-
-    st.markdown("---")
-    st.markdown("### Compare avenues")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.markdown("**Leveraged ETP (e.g., WisdomTree Gold 2× — LSE: LBUL / Xetra: 4RT8)**")
-        st.write("- Targets **+200% of daily move** of gold futures index")
-        st.write("- No margin calls; **TER ~0.98%**; potential **decay** in choppy markets")
-    with col2:
-        st.markdown("**CFD (e.g., eToro)**")
-        st.write("- Choose **x2**; flexible sizing")
-        st.write("- Costs: spread + **overnight financing** (triple on Wed for commodities)")
-    with col3:
-        st.markdown("**Futures (IBKR)**")
-        st.write("- CME: **1 oz / 10 oz (Micro MGC) / 50 oz (E-mini QO)**")
-        st.write("- Very low ongoing fees; **contract granularity** matters for small accounts")
-
-    with st.expander("CFD financing quick calculator"):
-        notional = st.number_input("CFD notional (€)", min_value=500.0, value=2000.0, step=100.0)
-        fin_rate = st.number_input("Overnight financing (annual %, enter positive for cost)", value=6.0, step=0.5) / 100.0
-        fin_days = st.slider("Days held", 1, 60, 10)
-        fin_cost = notional * fin_rate * (fin_days / 365.0)
-        st.metric("Estimated financing cost (€)", f"{fin_cost:,.2f}")
 
 st.markdown("---")
 st.markdown("#### Disclaimers")
@@ -290,17 +260,31 @@ st.write("This tool is for **educational planning** only. It does not provide in
          "ETPs may track **gold futures** rather than spot; hedged lines use daily hedging with small tracking differences.")
 '''
 
-requirements = r'''
+requirements = """\
 streamlit>=1.33
 pandas>=2.2
 numpy>=1.26
 plotly>=5.20
-'''
+"""
 
+config_toml = """\
+[theme]
+base="dark"
+primaryColor="#FFD166"
+backgroundColor="#0f1116"
+secondaryBackgroundColor="#1a1f2e"
+textColor="#ECECEC"
+"""
+
+# Write files for download
+os.makedirs('/mnt/data/.streamlit', exist_ok=True)
 with open('/mnt/data/app.py', 'w', encoding='utf-8') as f:
-    f.write(app_code)
+    f.write(app_py)
 
 with open('/mnt/data/requirements.txt', 'w', encoding='utf-8') as f:
     f.write(requirements)
 
-print("Files written:", "/mnt/data/app.py", "/mnt/data/requirements.txt")
+with open('/mnt/data/.streamlit/config.toml', 'w', encoding='utf-8') as f:
+    f.write(config_toml)
+
+print("Created:", "/mnt/data/app.py", "/mnt/data/requirements.txt", "/mnt/data/.streamlit/config.toml")
